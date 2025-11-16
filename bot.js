@@ -371,10 +371,25 @@ class OTPBot {
   const fifteenMinutes = 15 * 60 * 1000;
 
   const jobData = {
-    interval: null, startTime: orderStartTime, messageId, userId, price, chatId, phoneNumber, serviceName, activationId,
-    serviceCode, countryCode, serverName, cancelUpdateInterval: null, countdownInterval: null, 
-    otpReceived: false, lastOtp: null, otpCount: 0 
-  };
+  interval: null, 
+  startTime: orderStartTime, 
+  messageId, 
+  userId, 
+  price, 
+  chatId, 
+  phoneNumber, 
+  serviceName, 
+  activationId,
+  serviceCode, 
+  countryCode, 
+  serverName, 
+  cancelUpdateInterval: null, 
+  countdownInterval: null, 
+  otpReceived: false, 
+  lastOtp: null, 
+  otpCount: 0,
+  cancelling: false
+};
   this.activeJobs.set(orderId, jobData);
 
   const getUpdatedKeyboard = (timeLeft = null, isOtpReceived = false) => {
@@ -1129,31 +1144,32 @@ Confirm this transfer?
   }
 
   async handleTransferCallback(query) {
-    const chatId = query.message.chat.id;
-    const userId = query.from.id;
-    const data = query.data;
+  const chatId = query.message.chat.id;
+  const userId = query.from.id;
+  const data = query.data;
 
-    if (data === 'transfer_confirm') {
-      const userState = this.getUserState(userId);
+  if (data === 'transfer_confirm') {
+    const userState = this.getUserState(userId);
+    
+    if (!userState || !userState.data.targetUserId || !userState.data.amount) {
+      await this.bot.editMessageText('❌ Transfer session expired. Please start again.', {
+        chat_id: chatId,
+        message_id: query.message.message_id
+      });
+      return;
+    }
+
+    const targetUserId = userState.data.targetUserId;
+    const amount = userState.data.amount;
+
+    try {
+      await this.db.transferBalance(userId, targetUserId, amount, 'User transfer');
       await this.notifier.balanceTransferred(userId, targetUserId, amount, 'User transfer');
-      if (!userState || !userState.data.targetUserId || !userState.data.amount) {
-        await this.bot.editMessageText('❌ Transfer session expired. Please start again.', {
-          chat_id: chatId,
-          message_id: query.message.message_id
-        });
-        return;
-      }
+      
+      const currentUser = await this.db.getUser(userId);
+      const targetUser = await this.db.getUser(targetUserId);
 
-      const targetUserId = userState.data.targetUserId;
-      const amount = userState.data.amount;
-
-      try {
-        await this.db.transferBalance(userId, targetUserId, amount, 'User transfer');
-        await this.notifier.balanceTransferred(userId, targetUserId, amount, 'User transfer');
-        const currentUser = await this.db.getUser(userId);
-        const targetUser = await this.db.getUser(targetUserId);
-
-        await this.bot.editMessageText(`
+      await this.bot.editMessageText(`
 ✅ <b>Transfer Successful!</b>
 
 💰 <b>Amount:</b> ₹${amount}
@@ -1161,14 +1177,14 @@ Confirm this transfer?
 💳 <b>Your New Balance:</b> ₹${this.payment.formatCurrency(currentUser.balance)}
 
 Transfer completed successfully.
-        `.trim(), {
-          chat_id: chatId,
-          message_id: query.message.message_id,
-          parse_mode: 'HTML'
-        });
+      `.trim(), {
+        chat_id: chatId,
+        message_id: query.message.message_id,
+        parse_mode: 'HTML'
+      });
 
-        try {
-          await this.bot.sendMessage(targetUserId, `
+      try {
+        await this.bot.sendMessage(targetUserId, `
 🎉 <b>Balance Received!</b>
 
 💰 <b>Amount:</b> ₹${amount}
@@ -1176,24 +1192,24 @@ Transfer completed successfully.
 💳 <b>Your New Balance:</b> ₹${this.payment.formatCurrency(targetUser.balance)}
 
 Balance transferred successfully.
-          `.trim(), {
-            parse_mode: 'HTML'
-          });
-        } catch (error) {
-          console.error('Failed to notify receiver:', error);
-        }
-
-        this.clearUserState(userId);
-
-      } catch (error) {
-        console.error('Transfer error:', error);
-        await this.bot.editMessageText('❌ Transfer failed. Please try again.', {
-          chat_id: chatId,
-          message_id: query.message.message_id
+        `.trim(), {
+          parse_mode: 'HTML'
         });
+      } catch (error) {
+        console.error('Failed to notify receiver:', error);
       }
+
+      this.clearUserState(userId);
+
+    } catch (error) {
+      console.error('Transfer error:', error);
+      await this.bot.editMessageText('❌ Transfer failed. Please try again.', {
+        chat_id: chatId,
+        message_id: query.message.message_id
+      });
     }
   }
+}
 
   async handleAdminCallback(query) {
     const chatId = query.message.chat.id;
@@ -1832,7 +1848,9 @@ Please try a different search term.
 
   const processingMsg = await this.bot.sendMessage(chatId,
     `🔄 <b>Processing Order...</b>\n\n📱 Service: ${service.name}\n💰 Price: ₹${finalPrice}${discountCalc.discount > 0 ? ` (${discountCalc.discountPercent}% OFF)` : ''}`,
-    { parse_mode: 'HTML' }
+    { 
+      parse_mode: 'HTML'
+    }
   );
 
   try {
@@ -1952,6 +1970,15 @@ async handleCancelOrder(query) {
       return;
     }
 
+
+    if (job.cancelling) {
+      await this.bot.answerCallbackQuery(query.id, {
+        text: '⏳ Cancellation already in progress...',
+        show_alert: false
+      });
+      return;
+    }
+
     const timeElapsed = Date.now() - job.startTime;
     const twoMinutes = 2 * 60 * 1000;
 
@@ -1971,6 +1998,10 @@ async handleCancelOrder(query) {
       return;
     }
 
+
+    job.cancelling = true;
+    this.activeJobs.set(orderId, job);
+
     await this.bot.editMessageText(`🔄 <b>Cancelling Order...</b>\n\nPlease wait...`, {
       chat_id: chatId,
       message_id: query.message.message_id,
@@ -1979,93 +2010,67 @@ async handleCancelOrder(query) {
 
     let cancelSuccess = await this.firex.cancelOrder(job.activationId);
 
-    if (cancelSuccess) {
+    if (job.interval) clearInterval(job.interval);
+    if (job.cancelUpdateInterval) clearInterval(job.cancelUpdateInterval);
+    if (job.countdownInterval) clearInterval(job.countdownInterval);
+    
+    this.activeJobs.delete(orderId);
 
-      if (this.activeJobs.has(orderId)) {
-        const jobData = this.activeJobs.get(orderId);
-        if (jobData.interval) clearInterval(jobData.interval);
-        if (jobData.cancelUpdateInterval) clearInterval(jobData.cancelUpdateInterval);
-        if (jobData.countdownInterval) clearInterval(jobData.countdownInterval);
-        this.activeJobs.delete(orderId);
-      }
+  
+    await this.db.updateBalance(userId, job.price);
+    await this.db.removeActiveOrder(orderId);
+    await this.db.cancelOrder(orderId);
 
-      await this.db.updateBalance(userId, job.price);
-      await this.db.removeActiveOrder(orderId);
-      await this.db.cancelOrder(orderId);
+    await this.notifier.orderCancelled({
+      user_id: userId,
+      service: job.serviceName,
+      phone: job.phoneNumber,
+      price: job.price,
+      order_id: orderId
+    }, cancelSuccess ? 'User cancelled' : 'User cancelled (API failed)');
 
-      await this.notifier.orderCancelled({
-        user_id: userId,
-        service: job.serviceName,
-        phone: job.phoneNumber,
-        price: job.price,
-        order_id: orderId
-      }, 'User cancelled');
-
-      const cancelSuccessText = `
+    const cancelSuccessText = `
 ✅ <b>Order Cancelled & Refunded</b>
 📱 <b>Number:</b> <code>${job.phoneNumber}</code>
 💰 <b>Refunded:</b> ₹${job.price}`;
 
-      await this.bot.editMessageText(cancelSuccessText, {
-        chat_id: chatId,
-        message_id: query.message.message_id,
-        parse_mode: 'HTML',
-        reply_markup: {
-        }
-      });
-
-    } else {
-      await this.db.updateBalance(userId, job.price);
-      await this.db.removeActiveOrder(orderId);
-      await this.db.cancelOrder(orderId);
-
-      if (this.activeJobs.has(orderId)) {
-        const jobData = this.activeJobs.get(orderId);
-        if (jobData.interval) clearInterval(jobData.interval);
-        if (jobData.cancelUpdateInterval) clearInterval(jobData.cancelUpdateInterval);
-        if (jobData.countdownInterval) clearInterval(jobData.countdownInterval);
-        this.activeJobs.delete(orderId);
-      }
-
-      const refundText = `
-✅ <b>Order Refunded</b>
-📱 <b>Number:</b> <code>${job.phoneNumber}</code>
-💰 <b>Refunded:</b> ₹${job.price}`;
-
-      await this.bot.editMessageText(refundText, {
-        chat_id: chatId,
-        message_id: query.message.message_id,
-        parse_mode: 'HTML',
-        reply_markup: {
-          inline_keyboard: [
-            [
-              { 
-                text: `🔄 Buy ${job.serviceName} Again`, 
-                callback_data: `buy_new_${job.serviceCode}_0` 
-              }
-            ],
+    await this.bot.editMessageText(cancelSuccessText, {
+      chat_id: chatId,
+      message_id: query.message.message_id,
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { 
+              text: `🔄 Buy ${job.serviceName} Again`, 
+              callback_data: `buy_new_${job.serviceCode}_0` 
+            }
+          ],
+          [
+            { text: '🛒 Browse Services', callback_data: 'all_services_0' },
           ]
-        }
-      });
-    }
+        ]
+      }
+    });
+
   } catch (error) {
     console.error('Cancel order error:', error);
     
 
-    try {
-      const job = this.activeJobs.get(orderId);
-      if (job) {
+    const job = this.activeJobs.get(orderId);
+    if (job) {
+      if (job.interval) clearInterval(job.interval);
+      if (job.cancelUpdateInterval) clearInterval(job.cancelUpdateInterval);
+      if (job.countdownInterval) clearInterval(job.countdownInterval);
+      this.activeJobs.delete(orderId);
+ 
+      try {
         await this.db.updateBalance(userId, job.price);
         await this.db.removeActiveOrder(orderId);
         await this.db.cancelOrder(orderId);
-
-        if (job.interval) clearInterval(job.interval);
-        if (job.cancelUpdateInterval) clearInterval(job.cancelUpdateInterval);
-        if (job.countdownInterval) clearInterval(job.countdownInterval);
-        this.activeJobs.delete(orderId);
+      } catch (refundError) {
+        console.error('Refund during error also failed:', refundError);
       }
-    } catch (refundError) {
-      console.error('Refund during error also failed:', refundError);
     }
 
     await this.bot.editMessageText(
@@ -2076,6 +2081,18 @@ async handleCancelOrder(query) {
         parse_mode: 'HTML'
       }
     );
+  }
+}
+
+
+cleanupJob(orderId) {
+  const job = this.activeJobs.get(orderId);
+  if (job) {
+    if (job.interval) clearInterval(job.interval);
+    if (job.cancelUpdateInterval) clearInterval(job.cancelUpdateInterval);
+    if (job.otpCountdownInterval) clearInterval(job.otpCountdownInterval);
+    if (job.countdownInterval) clearInterval(job.countdownInterval);
+    this.activeJobs.delete(orderId);
   }
 }
 
@@ -3417,50 +3434,70 @@ Your balance will be updated after verification.
   }
 
   async showMyOrders(chatId, userId) {
-    const activeOrders = await this.db.getActiveOrders(userId);
-    const orderHistory = await this.db.getUserOrders(userId);
-    const user = await this.db.getUser(userId);
 
-    let ordersText = '📊 <b>Your Orders</b>\n\n';
+  await this.db.cleanupExpiredOrders();
+  
+  const activeOrders = await this.db.getActiveOrders(userId);
+  const orderHistory = await this.db.getUserOrders(userId);
+  const user = await this.db.getUser(userId);
 
-    if (activeOrders.length > 0) {
-      ordersText += '🟢 <b>Active Orders:</b>\n';
-      activeOrders.forEach(order => {
-        ordersText += `• ${order.product} - <code>${order.phone}</code> (ID: ${order.order_id})\n`;
-        const timeLeft = new Date(order.expires_at) - Date.now();
-        ordersText += `  Expires in: ${Math.round(timeLeft / 60000)} minutes\n\n`;
-      });
-    } else {
-      ordersText += '❌ <b>No active orders</b>\n\n';
-    }
+  let ordersText = '📊 <b>Your Orders</b>\n\n';
 
-    if (orderHistory.length > 0) {
-      ordersText += '📋 <b>Recent Orders:</b>\n';
-      orderHistory.slice(0, 5).forEach(order => {
-        const statusIcon = order.status === 'completed' ? '✅' : order.status === 'cancelled' ? '❌' : '🟡';
-        let orderText = `${statusIcon} ${order.service} - ${order.phone} - ₹${order.price}`;
-
-        if (order.discount_applied > 0) {
-          orderText += ` (Saved: ₹${this.payment.formatCurrency(order.discount_applied)})`;
+  if (activeOrders.length > 0) {
+    ordersText += '<b>Active Orders:</b>\n';
+    activeOrders.forEach(order => {
+      const expiresAt = new Date(order.expires_at);
+      const now = new Date();
+      const timeDiff = expiresAt - now;
+      
+      let timeText = '';
+      if (timeDiff <= 0) {
+      } else {
+        const minutesLeft = Math.max(0, Math.floor(timeDiff / (1000 * 60)));
+        const hoursLeft = Math.floor(minutesLeft / 60);
+        const remainingMinutes = minutesLeft % 60;
+        
+        if (hoursLeft > 0) {
+          timeText = `⏰ Expires in: ${hoursLeft}h ${remainingMinutes}m`;
+        } else {
+          timeText = `⏰ Expires in: ${minutesLeft}m`;
         }
-
-        ordersText += orderText + '\n';
-        if (order.otp_code) {
-          ordersText += `  🔐 OTP: <code>${order.otp_code}</code>\n`;
-        }
-        ordersText += '\n';
-      });
-    } else {
-      ordersText += '❌ <b>No order history</b>\n';
-    }
-
-    ordersText += `\n💰 <b>Current Balance:</b> ₹${this.payment.formatCurrency(user.balance)}`;
-
-    await this.bot.sendMessage(chatId, ordersText, {
-      parse_mode: 'HTML',
-      reply_markup: this.getMainKeyboard()
+      }
+      
+      ordersText += `• ${order.product} - <code>${order.phone}</code> (ID: ${order.order_id})\n`;
+      ordersText += `  ${timeText}\n\n`;
     });
+  } else {
+    ordersText += '❌ <b>No active orders</b>\n\n';
   }
+
+  if (orderHistory.length > 0) {
+    ordersText += '📋 <b>Recent Orders:</b>\n';
+    orderHistory.slice(0, 5).forEach(order => {
+      const statusIcon = order.status === 'completed' ? '✅' : order.status === 'cancelled' ? '❌' : '🟡';
+      let orderText = `${statusIcon} ${order.service} - ${order.phone} - ₹${order.price}`;
+
+      if (order.discount_applied > 0) {
+        orderText += ` (Saved: ₹${this.payment.formatCurrency(order.discount_applied)})`;
+      }
+
+      ordersText += orderText + '\n';
+      if (order.otp_code) {
+        ordersText += `  🔐 OTP: <code>${order.otp_code}</code>\n`;
+      }
+      ordersText += '\n';
+    });
+  } else {
+    ordersText += '❌ <b>No order history</b>\n';
+  }
+
+  ordersText += `\n💰 <b>Current Balance:</b> ₹${this.payment.formatCurrency(user.balance)}`;
+
+  await this.bot.sendMessage(chatId, ordersText, {
+    parse_mode: 'HTML',
+    reply_markup: this.getMainKeyboard()
+  });
+}
 
   async showHelp(chatId) {
     const helpText = `
