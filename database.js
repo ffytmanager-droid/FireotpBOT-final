@@ -1,28 +1,40 @@
-// database.js - PostgreSQL Version
+// database.js - PostgreSQL Version for Render with DATABASE_URL
 const { Client } = require('pg');
-const format = require('pg-format');
 
 class DatabaseManager {
   constructor() {
-    this.client = new Client({
-      host: process.env.PG_HOST || 'localhost',
-      port: process.env.PG_PORT || 5432,
-      user: process.env.PG_USER,
-      password: process.env.PG_PASSWORD,
-      database: process.env.PG_DATABASE,
-      ssl: process.env.PG_SSL === 'true' ? { rejectUnauthorized: false } : false
-    });
-    
+    this.client = null;
+    this.isConnecting = false;
     this.connect();
   }
 
   async connect() {
+    if (this.isConnecting) return;
+    this.isConnecting = true;
+
     try {
+      // Use DATABASE_URL from environment variables
+      const connectionString = process.env.DATABASE_URL;
+      
+      if (!connectionString) {
+        throw new Error('DATABASE_URL environment variable is required');
+      }
+
+      this.client = new Client({
+        connectionString: connectionString,
+        ssl: process.env.PG_SSL === 'true' ? { rejectUnauthorized: false } : false,
+        connectionTimeoutMillis: 10000,
+        idle_in_transaction_session_timeout: 10000
+      });
+
       await this.client.connect();
-      console.log('✅ Connected to PostgreSQL database');
+      console.log('✅ Connected to PostgreSQL database on Render');
+      this.isConnecting = false;
       await this.initDatabase();
     } catch (error) {
-      console.error('❌ Database connection error:', error);
+      console.error('❌ Database connection error:', error.message);
+      this.isConnecting = false;
+      // Retry after 5 seconds
       setTimeout(() => this.connect(), 5000);
     }
   }
@@ -146,17 +158,29 @@ class DatabaseManager {
     ];
 
     try {
+      console.log('🔄 Creating PostgreSQL tables...');
       for (let i = 0; i < queries.length; i++) {
         await this.client.query(queries[i]);
+        console.log(`✅ Table ${i + 1} created successfully`);
       }
-      console.log('✅ PostgreSQL tables created successfully');
+      console.log('✅ All PostgreSQL tables created successfully');
     } catch (error) {
-      console.error('❌ Error creating tables:', error);
+      console.error('❌ Error creating tables:', error.message);
+    }
+  }
+
+  async ensureConnection() {
+    try {
+      await this.client.query('SELECT 1');
+    } catch (error) {
+      console.log('🔄 Reconnecting to database...');
+      await this.connect();
     }
   }
 
   async getUser(userId) {
     try {
+      await this.ensureConnection();
       const result = await this.client.query(
         'SELECT * FROM users WHERE user_id = $1',
         [userId]
@@ -183,12 +207,13 @@ class DatabaseManager {
 
       return result.rows[0];
     } catch (error) {
-      console.error('Get user error:', error);
+      console.error('Get user error:', error.message);
       throw error;
     }
   }
 
   async updateUserProfile(userId, firstName, username) {
+    await this.ensureConnection();
     await this.client.query(
       'UPDATE users SET first_name = $1, username = $2 WHERE user_id = $3',
       [firstName, username, userId]
@@ -197,6 +222,7 @@ class DatabaseManager {
 
   async updateBalance(userId, amount) {
     try {
+      await this.ensureConnection();
       console.log(`💰 Updating balance: User ${userId}, Amount: ${amount}`);
       
       const result = await this.client.query(
@@ -208,12 +234,13 @@ class DatabaseManager {
         throw new Error('User not found');
       }
     } catch (error) {
-      console.error('Update balance error:', error);
+      console.error('Update balance error:', error.message);
       throw error;
     }
   }
 
   async updateMonthlyDeposit(userId, amount) {
+    await this.ensureConnection();
     const currentMonth = this.getCurrentMonthYear();
     
     await this.client.query(
@@ -226,6 +253,7 @@ class DatabaseManager {
   }
 
   async setMonthlyDeposit(userId, amount) {
+    await this.ensureConnection();
     const currentMonth = this.getCurrentMonthYear();
     
     await this.client.query(
@@ -238,6 +266,7 @@ class DatabaseManager {
   }
 
   async resetMonthlyDeposit(userId) {
+    await this.ensureConnection();
     const currentMonth = this.getCurrentMonthYear();
     
     await this.client.query(
@@ -247,6 +276,7 @@ class DatabaseManager {
   }
 
   async getMonthlyDeposit(userId) {
+    await this.ensureConnection();
     const currentMonth = this.getCurrentMonthYear();
     
     const result = await this.client.query(
@@ -258,6 +288,7 @@ class DatabaseManager {
   }
 
   async getTopDepositors(limit, offset) {
+    await this.ensureConnection();
     const currentMonth = this.getCurrentMonthYear();
     
     const result = await this.client.query(
@@ -279,6 +310,7 @@ class DatabaseManager {
   }
 
   async getAllDepositors(limit, offset) {
+    await this.ensureConnection();
     const currentMonth = this.getCurrentMonthYear();
     
     const result = await this.client.query(
@@ -300,6 +332,7 @@ class DatabaseManager {
   }
 
   async getDiscountedUsers(minDeposit, limit, offset) {
+    await this.ensureConnection();
     const currentMonth = this.getCurrentMonthYear();
     
     const result = await this.client.query(
@@ -321,6 +354,7 @@ class DatabaseManager {
   }
 
   async incrementOrderCount(userId) {
+    await this.ensureConnection();
     await this.client.query(
       'UPDATE users SET total_orders = total_orders + 1 WHERE user_id = $1',
       [userId]
@@ -328,16 +362,19 @@ class DatabaseManager {
   }
 
   async getTotalUsers() {
+    await this.ensureConnection();
     const result = await this.client.query('SELECT COUNT(*) as count FROM users');
     return parseInt(result.rows[0].count);
   }
 
   async getTotalOrders() {
+    await this.ensureConnection();
     const result = await this.client.query('SELECT COUNT(*) as count FROM orders');
     return parseInt(result.rows[0].count);
   }
 
   async getTotalRevenue() {
+    await this.ensureConnection();
     const result = await this.client.query(
       'SELECT SUM(price) as total FROM orders WHERE status = $1',
       ['completed']
@@ -346,6 +383,7 @@ class DatabaseManager {
   }
 
   async getAllUsers(limit = 50) {
+    await this.ensureConnection();
     const result = await this.client.query(
       'SELECT user_id, first_name, username, balance, total_orders, joined_date FROM users ORDER BY joined_date DESC LIMIT $1',
       [limit]
@@ -354,6 +392,7 @@ class DatabaseManager {
   }
 
   async searchUsers(query) {
+    await this.ensureConnection();
     const searchQuery = `%${query}%`;
     const result = await this.client.query(
       `SELECT user_id, first_name, username, balance, total_orders
@@ -366,6 +405,7 @@ class DatabaseManager {
   }
 
   async createGiftCode(codeData) {
+    await this.ensureConnection();
     const { code, amount, createdBy, maxUses = 1, expiresAt } = codeData;
     
     const result = await this.client.query(
@@ -377,6 +417,7 @@ class DatabaseManager {
   }
 
   async getGiftCode(code) {
+    await this.ensureConnection();
     const result = await this.client.query(
       `SELECT g.*, COUNT(gu.id) as used_count
        FROM gift_codes g
@@ -390,6 +431,7 @@ class DatabaseManager {
   }
 
   async checkIfUserUsedGiftCode(code, userId) {
+    await this.ensureConnection();
     const result = await this.client.query(
       'SELECT id FROM gift_code_uses WHERE code = $1 AND user_id = $2',
       [code, userId]
@@ -400,15 +442,17 @@ class DatabaseManager {
 
   async checkUserDepositCondition(userId, minDeposit = 0) {
     try {
+      await this.ensureConnection();
       const monthlyDeposit = await this.getMonthlyDeposit(userId);
       return monthlyDeposit >= minDeposit;
     } catch (error) {
-      console.error('Deposit condition check error:', error);
+      console.error('Deposit condition check error:', error.message);
       return false;
     }
   }
 
   async createGiftCodeWithCondition(codeData) {
+    await this.ensureConnection();
     const { code, amount, createdBy, maxUses = 1, expiresAt, minDeposit = 0 } = codeData;
     
     const result = await this.client.query(
@@ -420,21 +464,24 @@ class DatabaseManager {
   }
 
   async getGiftCodeWithCondition(code) {
-    return this.getGiftCode(code); // Same method works for both
+    return this.getGiftCode(code);
   }
 
   async getAllGiftCodes() {
+    await this.ensureConnection();
     const result = await this.client.query('SELECT * FROM gift_codes ORDER BY created_at DESC');
     return result.rows;
   }
 
   async deleteGiftCode(code) {
+    await this.ensureConnection();
     const result = await this.client.query('DELETE FROM gift_codes WHERE code = $1', [code]);
     return result.rowCount > 0;
   }
 
   async useGiftCode(code, userId) {
     try {
+      await this.ensureConnection();
       const giftCode = await this.getGiftCode(code);
       
       if (!giftCode) {
@@ -461,13 +508,14 @@ class DatabaseManager {
       
       return true;
     } catch (error) {
-      console.error('Gift code processing error:', error);
+      console.error('Gift code processing error:', error.message);
       return false;
     }
   }
 
   async transferBalance(fromUserId, toUserId, amount, note = '') {
     try {
+      await this.ensureConnection();
       await this.client.query('BEGIN');
       
       await this.updateBalance(fromUserId, -amount);
@@ -487,6 +535,7 @@ class DatabaseManager {
   }
 
   async getBalanceTransfers(userId) {
+    await this.ensureConnection();
     const result = await this.client.query(
       `SELECT * FROM balance_transfers
        WHERE from_user_id = $1 OR to_user_id = $1
@@ -499,11 +548,13 @@ class DatabaseManager {
   }
 
   async getTotalBalanceTransfers() {
+    await this.ensureConnection();
     const result = await this.client.query('SELECT COUNT(*) as count FROM balance_transfers');
     return parseInt(result.rows[0].count);
   }
 
   async setChannelJoined(userId) {
+    await this.ensureConnection();
     const now = new Date().toISOString();
     await this.client.query(
       'UPDATE users SET channel_joined = true, last_checked = $1 WHERE user_id = $2',
@@ -512,6 +563,7 @@ class DatabaseManager {
   }
 
   async setChannelLeft(userId) {
+    await this.ensureConnection();
     await this.client.query(
       'UPDATE users SET channel_joined = false WHERE user_id = $1',
       [userId]
@@ -519,6 +571,7 @@ class DatabaseManager {
   }
 
   async setTermsAccepted(userId) {
+    await this.ensureConnection();
     await this.client.query(
       'UPDATE users SET terms_accepted = true WHERE user_id = $1',
       [userId]
@@ -526,6 +579,7 @@ class DatabaseManager {
   }
 
   async updateLastChecked(userId) {
+    await this.ensureConnection();
     const now = new Date().toISOString();
     await this.client.query(
       'UPDATE users SET last_checked = $1 WHERE user_id = $2',
@@ -534,11 +588,13 @@ class DatabaseManager {
   }
 
   async getUsersForVerification() {
+    await this.ensureConnection();
     const result = await this.client.query('SELECT user_id FROM users WHERE channel_joined = true');
     return result.rows.map(row => row.user_id);
   }
 
   async addOrder(orderData) {
+    await this.ensureConnection();
     const { user_id, service, phone, price, order_id, activation_id, status, server_used, original_price, discount_applied } = orderData;
 
     const result = await this.client.query(
@@ -552,6 +608,7 @@ class DatabaseManager {
   }
 
   async addActiveOrder(orderData) {
+    await this.ensureConnection();
     const { order_id, activation_id, user_id, phone, product, expires_at, server_used } = orderData;
     
     await this.client.query(
@@ -564,15 +621,18 @@ class DatabaseManager {
   }
 
   async removeActiveOrder(orderId) {
+    await this.ensureConnection();
     await this.client.query('DELETE FROM active_orders WHERE order_id = $1', [orderId]);
   }
 
   async getActiveOrders(userId) {
+    await this.ensureConnection();
     const result = await this.client.query('SELECT * FROM active_orders WHERE user_id = $1', [userId]);
     return result.rows;
   }
 
   async getUserOrders(userId) {
+    await this.ensureConnection();
     const result = await this.client.query(
       `SELECT order_id, service, phone, price, status, order_time, otp_code, server_used, original_price, discount_applied
        FROM orders WHERE user_id = $1 ORDER BY order_time DESC LIMIT 10`,
@@ -582,6 +642,7 @@ class DatabaseManager {
   }
 
   async updateOrderOTP(orderId, otpCode) {
+    await this.ensureConnection();
     await this.client.query(
       'UPDATE orders SET otp_code = $1, status = $2 WHERE order_id = $3',
       [otpCode, 'completed', orderId]
@@ -589,6 +650,7 @@ class DatabaseManager {
   }
 
   async cancelOrder(orderId) {
+    await this.ensureConnection();
     await this.client.query(
       'UPDATE orders SET status = $1 WHERE order_id = $2',
       ['cancelled', orderId]
@@ -596,6 +658,7 @@ class DatabaseManager {
   }
 
   async logTopupRequest(userId, amount, utr, status) {
+    await this.ensureConnection();
     const result = await this.client.query(
       `INSERT INTO topup_requests (user_id, amount, utr, status)
        VALUES ($1, $2, $3, $4) RETURNING id`,
@@ -606,6 +669,7 @@ class DatabaseManager {
   }
 
   async updateTopupStatus(requestId, status) {
+    await this.ensureConnection();
     await this.client.query(
       'UPDATE topup_requests SET status = $1 WHERE id = $2',
       [status, requestId]
@@ -613,6 +677,7 @@ class DatabaseManager {
   }
 
   async getTopupRequestInfo(requestId) {
+    await this.ensureConnection();
     const result = await this.client.query(
       'SELECT user_id, amount, utr, status FROM topup_requests WHERE id = $1',
       [requestId]
@@ -622,11 +687,13 @@ class DatabaseManager {
   }
 
   async checkDuplicateUTR(utr) {
+    await this.ensureConnection();
     const result = await this.client.query('SELECT id FROM topup_requests WHERE utr = $1', [utr]);
     return result.rows.length > 0;
   }
 
   async getUserDepositHistory(userId) {
+    await this.ensureConnection();
     const result = await this.client.query(
       `SELECT id, amount, utr, status, request_time
        FROM topup_requests WHERE user_id = $1 ORDER BY request_time DESC LIMIT 10`,
@@ -637,6 +704,7 @@ class DatabaseManager {
   }
 
   async createReferral(referrerId, referredId, referralCode) {
+    await this.ensureConnection();
     const result = await this.client.query(
       `INSERT INTO referrals (referrer_id, referred_id, referral_code) 
        VALUES ($1, $2, $3)
@@ -650,6 +718,7 @@ class DatabaseManager {
   }
 
   async getReferralByCode(referralCode) {
+    await this.ensureConnection();
     const result = await this.client.query(
       'SELECT * FROM referrals WHERE referral_code = $1 AND is_active = true',
       [referralCode]
@@ -659,6 +728,7 @@ class DatabaseManager {
   }
 
   async getReferralByReferredId(referredId) {
+    await this.ensureConnection();
     const result = await this.client.query(
       'SELECT * FROM referrals WHERE referred_id = $1',
       [referredId]
@@ -668,6 +738,7 @@ class DatabaseManager {
   }
 
   async getReferralCodeByUserId(userId) {
+    await this.ensureConnection();
     const result = await this.client.query(
       'SELECT referral_code FROM referrals WHERE referrer_id = $1 AND referred_id = $1',
       [userId]
@@ -677,6 +748,7 @@ class DatabaseManager {
   }
 
   async getUserReferrals(userId) {
+    await this.ensureConnection();
     const result = await this.client.query(
       `SELECT r.*, u.first_name, u.username 
        FROM referrals r 
@@ -690,6 +762,7 @@ class DatabaseManager {
   }
 
   async addReferralEarning(earningData) {
+    await this.ensureConnection();
     const { referrer_id, referred_id, deposit_amount, commission_amount, commission_percent = 5 } = earningData;
 
     console.log(`💾 Saving referral earning: Referrer ${referrer_id}, Referred ${referred_id}, Commission ₹${commission_amount}`);
@@ -706,6 +779,7 @@ class DatabaseManager {
   }
 
   async getReferralEarnings(userId) {
+    await this.ensureConnection();
     const result = await this.client.query(
       `SELECT re.*, u.first_name, u.username 
        FROM referral_earnings re 
@@ -719,6 +793,7 @@ class DatabaseManager {
   }
 
   async getTotalReferralEarnings(userId) {
+    await this.ensureConnection();
     const result = await this.client.query(
       'SELECT SUM(commission_amount) as total_earnings FROM referral_earnings WHERE referrer_id = $1',
       [userId]
@@ -728,6 +803,7 @@ class DatabaseManager {
   }
 
   async getReferralStats(userId) {
+    await this.ensureConnection();
     const result = await this.client.query(
       `SELECT 
         COUNT(*) as total_referrals,
@@ -743,13 +819,16 @@ class DatabaseManager {
   }
 
   async debugAllReferrals() {
+    await this.ensureConnection();
     const result = await this.client.query('SELECT * FROM referrals');
     console.log('🔍 DEBUG - All referrals:', result.rows);
     return result.rows;
   }
 
   async close() {
-    await this.client.end();
+    if (this.client) {
+      await this.client.end();
+    }
   }
 }
 
