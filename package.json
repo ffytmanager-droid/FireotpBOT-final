@@ -1,0 +1,23 @@
+{
+  "name": "fire-otp-bot",
+  "version": "2.0.0",
+  "description": "created by~ @gt_verified",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "dev": "nodemon bot.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "dotenv": "^17.2.3",
+    "moment": "^2.29.4",
+    "node-telegram-bot-api": "^0.64.0",
+    "qrcode": "^1.5.3",
+    "pg": "^8.11.3",
+    "pg-format": "^1.0.4",
+    "uuid": "^13.0.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  }
+}
